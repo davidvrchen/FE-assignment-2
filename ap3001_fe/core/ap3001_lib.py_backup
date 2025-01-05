@@ -1,0 +1,1324 @@
+import numpy
+import scipy
+
+import skfem
+from skfem.visuals.matplotlib import plot as skplot
+from skfem.visuals.matplotlib import plot3 as skplot3, show
+
+from assignment_functions import *
+
+
+# Basis functions -------------------------------------------------------------
+
+class HatBasisFunctions:
+    def __init__(self, mesh, bcs):
+        # Mesh information
+        self.mesh = mesh  # locally save the mesh
+
+        # Set the number of basis in the mesh
+        self.n_basis = self.__number_of_basis()
+
+        # Get the indices of basis and values at each essential boundary
+        self.essential_bcs = self.__get_essential_boundary_conditions(bcs)
+
+        # Set the number of canonical basis
+        self.n_canonical_basis = 3  # for piecewise linear hat functions on a triangle, there are are 
+                                    # three canonical basis: one associated to each of the three vertices
+                                    # of the canonical triangle
+
+        # Compute the full extraction coefficient tensor E
+        # E[l, i, j] is the coefficient of local basis j, associated to global basis i, on element l.
+        #   phi_j (x, y) = sum_l sum_j E[l, i, j] B_l_j(x, y)
+        # or using the canonical basis
+        #   phi_j (x, y) = sum_l sum_j E[l, i, j] B_c_j( Phi_l^-1 (x, y) )
+        self.E_full = self.__compute_full_extraction_coefficient_tensor_hat_function_triangle()
+
+        # Compute the extraction coefficient tensor with respect to the active basis on each element 
+        # Now E_active_basis[k, i, j] is the coefficient of local basis j, associated to active global basis i, on element l.
+        # active global basis i is the global basis with index element_active_basis[k, i], note that i = 0, ..., (n_active_basis_in_element - 1)
+        # In this way it becomes inneficient to compute each global basis separately as we were doing before
+        #   phi_j (x, y) = sum_l sum_j E[l, i, j] B_l_j(x, y)
+        # or using the canonical basis
+        #   phi_j (x, y) = sum_l sum_j E[l, i, j] B_c_j( Phi_l^-1 (x, y) )
+        # We can now only efficiently compute the contribution of each local element basis to all global basis.
+        # This is not an issue, because this is precisely what we need.
+        self.element_active_basis_idx, self.E_active_basis = self.__compute_efficient_extraction_coefficient_tensor_hat_function_triangle()
+        
+
+    def __number_of_basis(self):
+        n_vertices = self.mesh.number_of_vertices()  # number of vertices on the mesh
+        n_basis = n_vertices  # for piecewise linear hat functions on a triangular mesh, there are
+        return n_basis 
+    
+                        # as many basis as vertices in the mesh
+    def basis_canonical(self, xi, eta):
+        """Evaluates the canonical basis that enable the construction of hat functions.
+
+        The three canonical basis, B_c_1, B_c_2, and B_c_3 on the canonical triangle
+
+        (0,1) = V_3
+                |\\
+                |  \\ 
+                |    \\
+                |      \\
+                -------
+        (0,0) = V1     (1,0) = V_2   
+
+        are linear functions given by
+            
+            B_c_1(xi, eta) = alpha_1 + beta_1 xi + gamma_1 eta
+            B_c_2(xi, eta) = alpha_2 + beta_2 xi + gamma_2 eta
+            B_c_2(xi, eta) = alpha_3 + beta_3 xi + gamma_3 eta
+
+        with the property that
+            B_c_1(V_1) = 1.0, B_c_1(V_2) = 0.0, and B_c_1(V_3) = 0.0
+            B_c_2(V_1) = 0.0, B_c_2(V_2) = 1.0, and B_c_2(V_3) = 0.0
+            B_c_3(V_1) = 0.0, B_c_3(V_2) = 0.0, and B_c_3(V_3) = 1.0 
+        
+        Returns the 3 canonical basis evaluated at the M input points 
+            P_1 = (xi_1, eta_1)
+            ...
+            P_M = (xi_M, eta_M) 
+        
+        as a 3 x M matrix:
+                        -                         -
+            B_c_eval = | B_c_1(P_1) ... B_c_1(P_M) |
+                    | B_c_2(P_1) ... B_c_2(P_M) |
+                    | B_c_3(P_1) ... B_c_3(P_M) |
+                        -                         -
+        Usage
+        -----
+            mesh = ap3001_lib.Mesh('square', refinement=1) 
+            xi = numpy.array([0.0, 1.0, 0.0])
+            eta = numpy.array([0.0, 0.0, 1.0])
+            hat_basis = ap3001_lib.HatBasisFunctions(mesh)
+            B_c_eval = hat_basis.basis_canonical(xi, eta)
+        
+        Parameters
+        ----------
+        xi : numpy.array(Float64), size (M, )
+            The xi coordinates of the M points where to evaluate the three canonical basis.
+        eta : numpy.array(Float64), size (M, )
+            The eta coordinates of the M points where to evaluate the three canonical basis.
+        
+        Returns
+        -------
+        B_c_eval : numpy.array(Float64), size (3, M)
+            The array containing the evaluation of the three canonical basis on the M nodes (xi_i, eta_i).
+        """
+        return basis_canonical_triangle(xi, eta)
+    
+
+    def grad_basis_canonical(self, xi, eta):
+        """Evaluates the gradient of the canonical basis that enable the construction of hat functions.
+
+        The three canonical basis, B_c_1, B_c_2, and B_c_3 on the canonical triangle
+
+        (0,1) = V_3
+                |\\
+                |  \\ 
+                |    \\
+                |      \\
+                -------
+        (0,0) = V1     (1,0) = V_2   
+
+        are linear functions given by
+            
+            B_c_1(xi, eta) = alpha_1 + beta_1 xi + gamma_1 eta
+            B_c_2(xi, eta) = alpha_2 + beta_2 xi + gamma_2 eta
+            B_c_2(xi, eta) = alpha_3 + beta_3 xi + gamma_3 eta
+
+        with the property that
+            B_c_1(V_1) = 1.0, B_c_1(V_2) = 0.0, and B_c_1(V_3) = 0.0
+            B_c_2(V_1) = 0.0, B_c_2(V_2) = 1.0, and B_c_2(V_3) = 0.0
+            B_c_3(V_1) = 0.0, B_c_3(V_2) = 0.0, and B_c_3(V_3) = 1.0 
+        
+        Returns the 3 canonical basis evaluated at the M input points 
+            P_1 = (xi_1, eta_1)
+            ...
+            P_M = (xi_M, eta_M) 
+        
+        as a 3 x M matrix:
+                        -                         -
+            B_c_eval = | B_c_1(P_1) ... B_c_1(P_M) |
+                       | B_c_2(P_1) ... B_c_2(P_M) |
+                       | B_c_3(P_1) ... B_c_3(P_M) |
+                        -                         -
+        Usage
+        -----
+            mesh = ap3001_lib.Mesh('square', refinement=1) 
+            xi = numpy.array([0.0, 1.0, 0.0])
+            eta = numpy.array([0.0, 0.0, 1.0])
+            hat_basis = ap3001_lib.HatBasisFunctions(mesh)
+            dB_c_eval_dxi, d_B_c_eval_deta = hat_basis.grad_basis_canonical(xi, eta)
+        
+        Parameters
+        ----------
+        xi : numpy.array(Float64), size (M, )
+            The xi coordinates of the M points where to evaluate the three canonical basis.
+        eta : numpy.array(Float64), size (M, )
+            The eta coordinates of the M points where to evaluate the three canonical basis.
+        
+        Returns
+        -------
+        dB_c_eval_dxi : numpy.array(Float64), size (3, M)
+            The array containing the evaluation of the derivative with respect to xi of the
+            three canonical basis on the M nodes (xi_i, eta_i).
+        dB_c_eval_deta : numpy.array(Float64), size (3, M)
+            The array containing the evaluation of the derivative with respect to eta of the
+            three canonical basis on the M nodes (xi_i, eta_i).
+        """
+        return grad_basis_canonical_triangle(xi, eta)
+
+
+    def quadrature(self):
+        """Returns the Gauss quadrature weights and nodes suitable for this basis.
+
+        Returns the three 2D Gauss quadrature weights 
+            w_{i}, i = 1, 2, 3
+        associated to the nodes    
+            (xi, eta)_{i} in the canonical triangle (Omega_t) xi in [0, 1], eta in [0, 1] and eta + xi <= 1, i = 1, 2, 3    
+        to approximate
+            int_{Omega_t} f(xi, eta) dxi deta approx sum_{i=1}^{N} w_{i} f(xi_{i}, eta_{i})
+
+        Usage
+        -----
+            mesh = ap3001_lib.Mesh('square', refinement=1) 
+            xi = numpy.array([0.0, 1.0, 0.0])
+            eta = numpy.array([0.0, 0.0, 1.0])
+            hat_basis = ap3001_lib.HatBasisFunctions(mesh)
+            xi, eta, w = hat_basis.quadrature() 
+        
+        Parameters
+        ----------
+        None
+        
+        Returns
+        -------
+        xi : numpy.array(Float64), size (3, )
+            The xi coordinates of the three quadrature nodes associated to the quadrature 
+            weights w_{i}, i = 1, 2, 3.
+        eta : numpy.array(Float64), size (3, )
+            The eta coordinates of the three quadrature nodes associated to the quadrature 
+            weights w_{i}, i = 1, 2, 3.
+        w : numpy.array(Float64), size (3, )
+            The three quadrature weights associated to the three quadrature nodes (xi_{i}, eta_{i}), i = 1, 2, 3.
+        """
+        return gauss_quadrature_2D_triangle(1)
+
+
+    def __compute_full_extraction_coefficient_tensor_hat_function_triangle(self):  
+        # Extract mesh information 
+        n_elements = self.mesh.number_of_elements()  
+
+        # Pre-allocate memory for the extraction coefficient tensor
+        E_full = numpy.zeros([n_elements, self.n_basis, self.n_canonical_basis])
+
+        # Fill the extraction coefficient tensor with non-zero coefficients
+        for element_idx, global_bases_idxs in enumerate(self.mesh.elements):
+            # Since there is one global basis per vertex of the mesh, we number the 
+            # basis in the same way as the vertices, therefore basis i is associated 
+            # to vertex i.
+            # We do the same for the local and canonical basis numbering, therefore 
+            # vertex 1 of element is associated to the local and canonical bases 1
+            # of the element. This makes life easier.
+            for local_basis_idx, global_basis_idx in enumerate(global_bases_idxs):
+                E_full[element_idx, global_basis_idx, local_basis_idx] = 1.0
+
+        return E_full
+
+
+    def __compute_efficient_extraction_coefficient_tensor_hat_function_triangle(self):
+        # Extract mesh information 
+        n_elements = self.mesh.number_of_elements() 
+        elements = self.mesh.elements
+
+        # Compute the indices of the basis that are nonzero in each element 
+        # i.e., the indices of the active basis in each element
+        element_active_basis_idx = self.mesh.elements
+
+        # Compute the extraction coefficient matrix only for the active basis on each element
+        n_active_basis_per_elements = 3  # for this case, we will always have 3 active basis per element
+                                         # in other cases it is more complicated, for example, each element 
+                                         # may have a different number of active basis
+        
+        # Construct the extraction coefficient tensor with respect to the active basis on each element 
+        # Now E_active_basis[k, i, j] is the coefficient of local basis j, associated to active global basis i, on element l.
+        # active global basis i is the global basis with index element_active_basis[k, i], note that i = 0, ..., (n_active_basis_in_element - 1)
+        # In this way it becomes inneficient to compute each global basis separately as we were doing before
+        #   phi_j (x, y) = sum_l sum_j E[l, i, j] B_l_j(x, y)
+        # or using the canonical basis
+        #   phi_j (x, y) = sum_l sum_j E[l, i, j] B_c_j( Phi_l^-1 (x, y) )
+        # We can now only efficiently compute the contribution of each local element basis to all global basis.
+        # This is not an issue, because this is precisely what we need.
+        E_active_basis = numpy.zeros([n_elements, n_active_basis_per_elements, self.n_canonical_basis])
+        
+        for element_idx in numpy.arange(0, len(elements)):
+            E_active_basis[element_idx, 0, 0] = 1.0
+            E_active_basis[element_idx, 1, 1] = 1.0
+            E_active_basis[element_idx, 2, 2] = 1.0
+
+        return element_active_basis_idx, E_active_basis
+    
+
+    def __get_essential_boundary_conditions(self, bcs):
+        # Initialize the dictionary with essential boundary conditions
+        # The labels are the ones used in the input dictionary gammas 
+        essential_bc_conditions = dict.fromkeys(list(bcs))
+
+        # First get all the indices of the boundary vertices
+        boundary_vertices_idx = self.mesh.boundary_vertices  # indices of all vertices on the boundary
+
+        # Get x and y coordinates of all the vertices on the boundary 
+        x_boundary_vertices = self.mesh.vertices[boundary_vertices_idx, 0]
+        y_boundary_vertices = self.mesh.vertices[boundary_vertices_idx, 1]
+
+        # Loop over each of the boundary conditions and
+        #   - find the basis (vertices) in that boundary
+        #   - compute the boundary value
+
+        for boundary_key in bcs:
+            # Initialize dictionary with boundary condition
+            essential_bc_conditions[boundary_key] = {'indices': None, 'values': None}
+
+            # Extract boundary condition information
+            on_boundary_function = bcs[boundary_key]['on_boundary_function']  # function that evaluates to True if point (x, y) lies on the boundary or False if not
+            boundary_g = bcs[boundary_key]['g']  # function that returns the value of the solution at the boundary
+
+            # Find the indices of the vertices on the current boundary
+            on_boundary_mask = on_boundary_function(x_boundary_vertices, y_boundary_vertices)
+            vertices_on_current_boundary_idx = boundary_vertices_idx[on_boundary_mask]
+            essential_bc_conditions[boundary_key]['indices'] = vertices_on_current_boundary_idx
+
+            # Compute the value of the solution on those vertices
+            x_on_current_boundary = self.mesh.vertices[vertices_on_current_boundary_idx, 0]
+            y_on_current_boundary = self.mesh.vertices[vertices_on_current_boundary_idx, 1]
+            essential_bc_conditions[boundary_key]['values'] = boundary_g(x_on_current_boundary, y_on_current_boundary)
+
+        return essential_bc_conditions
+    
+# -----------------------------------------------------------------------------
+
+
+# Mapping ---------------------------------------------------------------------
+
+
+
+class Mesh:
+    def __init__(self, type_of_mesh: str, refinement=0):
+        # Generate the mesh
+        if type_of_mesh == "circle":
+            self._mesh = skfem.MeshTri1().init_circle().refined(refinement)
+
+        elif type_of_mesh == "square":
+            self._mesh = skfem.MeshTri1().refined(refinement)
+
+        else:
+            print("Error: domain type not recognized")
+            
+        # Make quick access to mesh entities
+        self.vertices = self._mesh.p.T  # the coordinates of the vertices: self.vertices[k, :] = [x_k, y_k]
+        self.edges = self._mesh.facets.T  # the indices of the vertices that make up each edge: self.edges[k, :] = [V_k_start, V_k_end], where V_k_start and V_k_end are indices of the vertices at the start and end of edge k
+        self.boundary_edges = self.edges[self._mesh.boundary_facets()]  # the indices of the vertices that make up each edge on the boundary
+        self.boundary_vertices = numpy.unique(self.boundary_edges.flatten())  # the indices of the vertices on the boundary
+        self.elements = self._mesh.t.T  # the indices of the vertices that make up each element (triangle) in clockwise order: self.elements[k, :] = [V_k_1, V_k_2, V_k_3]
+        self.type_of_mesh = type_of_mesh
+    
+
+    def number_of_vertices(self):
+        """ The number of vertices in the mesh.
+
+         Usage
+        -----
+            mesh = ap3001_lib.Mesh('square',refinement=1)
+            xi = numpy.array([0.0, 1.0, 0.0])
+            eta = numpy.array([0.0, 0.0, 1.0])
+            n_vertices = mesh.number_of_vertices()
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        n_vertices : int, size (single value)
+            The number of vertices in the mesh.
+        """
+        return len(self.vertices)
+    
+
+    def number_of_elements(self):
+        """ The number of elements in the mesh.
+
+         Usage
+        -----
+            mesh = ap3001_lib.Mesh('square',refinement=1)
+            xi = numpy.array([0.0, 1.0, 0.0])
+            eta = numpy.array([0.0, 0.0, 1.0])
+            n_elements = mesh.number_of_elements()
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        n_elements : int, size (single value)
+            The number of elements in the mesh.
+        """
+        return len(self.elements)
+    
+
+    def mapping(self, xi, eta, element_idx: int):
+        """Evaluates mapping between the canonical triangle element and the physical 
+        triangle element_idx.
+
+        Computes the mapping (x, y) = Phi(xi, eta) that maps a point (xi, eta) in the 
+        canonical triangle element
+
+        (0,1) = V_3
+                |\\
+                |  \\ 
+                |    \\
+                |      \\
+                -------
+        (0,0) = V1     (1,0) = V_2   
+
+        onto the physical triangle given by the three vertices
+            U_1 = vertices[0, :]
+            U_2 = vertices[1, :]
+            U_3 = vertices[2, :]
+        
+        such that
+            Phi(V_1) = U_1
+            Phi(V_2) = U_2
+            Phi(V_3) = U_3
+            
+        Returns the points (x_i, y_i) in the physical space
+            (x_i, y_i) = Phi(xi_i, eta_i)
+            
+        Usage
+        -----
+            mesh = ap3001_lib.Mesh('square',refinement=1)
+            xi = numpy.array([0.0, 1.0, 0.0])
+            eta = numpy.array([0.0, 0.0, 1.0])
+            element_idx = 4
+            x, y = mesh.mapping(xi, eta, element_idx)
+
+            matplotlib.pyplot.plot(x, y)
+            matplotlib.pyplot.show()
+        
+        Parameters
+        ----------
+        xi : numpy.array(Float64), size (M, )
+            The xi coordinates of the M points where to evaluate the mapping Phi.
+        eta : numpy.array(Float64), size (M, )
+            The eta coordinates of the M points where to evaluate the mapping Phi.
+        element_idx: int size (single value)
+            The index of the element (triangle) in the mesh to use.
+        
+        Returns
+        -------
+        x : numpy.array(Float64), size (M,)
+            The vector containing  x physical coordinates of the points inside the triangle
+            that are the image of the canonical points (xi_i, eta_i) via the mapping Phi.
+        y : numpy.array(Float64), size (M,)
+            The vector containing the y physical coordinates of the points inside the triangle
+            that are the image of the canonical points (xi_i, eta_i) via the mapping Phi.
+        """
+        vertices_idx = self.elements[element_idx]  # indices of the vertices that make up the element
+        vertices_coordinates = self.vertices[vertices_idx]  # the (x, y) coordinates of the vertices of the element
+
+        return mapping_triangle(xi, eta, vertices_coordinates)
+    
+
+    def jacobian(self, xi, eta, element_idx: int):
+        """Evaluates Jacobian matrix of the mapping between the canonical 
+        triangle element and the physical triangle with index element_idx.
+
+        Computes the Jacobian matrix
+                -                       -
+            J = | dPhi^x/dxi  dPhi^x/deta |
+                | dPhi^y/dxi  dPhi^y/deta |
+                -                       -
+
+        of the mapping (x, y) = Phi(xi, eta) that maps a point (xi, eta) in the 
+
+        canonical triangle element
+
+        (0,1) = V_3
+                |\\
+                |  \\ 
+                |    \\
+                |      \\
+                -------
+        (0,0) = V1     (1,0) = V_2   
+
+        onto the physical triangle given by the three vertices
+            U_1 = vertices[0, :]
+            U_2 = vertices[1, :]
+            U_3 = vertices[2, :]
+        
+        such that
+            Phi(V_1) = U_1
+            Phi(V_2) = U_2
+            Phi(V_3) = U_3
+            
+        Returns the Jacobian matrix evaluated at the points (xi_i, eta_i)
+            J[i, :, :]
+
+        i.e.
+            J[1, 1, 1] =  dPhi^y/deta (xi_2, eta_2) (note that the nodes are indexed base 1 and Python uses base 0)
+            J[1, 0, 1] =  dPhi^x/deta (xi_2, eta_2)
+            J[k, 1, 0] =  dPhi^y/dxi (xi_k, eta_k)
+
+                          -                       -
+            J[k, :, :] = | dPhi^x/dxi  dPhi^x/deta | (xi_k, eta_k) (i.e., evaluated at point (xi_k, eta_k)
+                         | dPhi^y/dxi  dPhi^y/deta |
+                          -                       -
+            
+        Usage
+        -----
+            mesh = ap3001_lib.Mesh('square',refinement=1)
+            xi = numpy.array([0.0, 1.0, 0.0])
+            eta = numpy.array([0.0, 0.0, 1.0])
+            element_idx = 4
+            J = mesh.jacobian(xi, eta, element_idx)
+        
+        Parameters
+        ----------
+        xi : numpy.array(Float64), size (M, )
+            The xi coordinates of the M points where to evaluate the mapping Phi.
+        eta : numpy.array(Float64), size (M, )
+            The eta coordinates of the M points where to evaluate the mapping Phi.
+        element_idx: int size (single value)
+            The index of the element (triangle) in the mesh to use.
+        
+        Returns
+        -------
+        J : numpy.array(Float64), size (M, 2, 2)
+            The Jacobian matrix evaluated at the points (xi_i, eta_i)
+                J[i, :, :]
+            i.e.
+                J[1, 1, 1] =  dPhi^y/deta (xi_2, eta_2) (note that the nodes are indexed base 1 and Python uses base 0)
+                J[1, 0, 1] =  dPhi^x/deta (xi_2, eta_2)
+                J[k, 1, 0] =  dPhi^y/dxi (xi_k, eta_k)
+
+                              -                       -
+                J[k, :, :] = | dPhi^x/dxi  dPhi^x/deta | (xi_k, eta_k) (i.e., evaluated at point (xi_k, eta_k)
+                             | dPhi^y/dxi  dPhi^y/deta |
+                              -                       -
+        """
+        vertices_idx = self.elements[element_idx]  # indices of the vertices that make up the element
+        vertices_coordinates = self.vertices[vertices_idx]  # the (x, y) coordinates of the vertices of the element
+
+        return jacobian_triangle(xi, eta, vertices_coordinates)
+    
+
+    def jacobian_transpose_times_jacobian(self, xi, eta, element_idx):
+        """Evaluates the metric matrix G = (J^T) J of the mapping between 
+        the canonical triangle element and the physical triangle with index element_idx.
+
+        Computes the metric matrix G = (J^T) J, where J is the Jacobian matrix
+                 -                       -
+            J = | dPhi^x/dxi  dPhi^x/deta |
+                | dPhi^y/dxi  dPhi^y/deta |
+                 -                       -
+
+        of the mapping (x, y) = Phi(xi, eta) that maps a point (xi, eta) in the 
+
+        canonical triangle element
+
+        (0,1) = V_3
+                |\\
+                |  \\ 
+                |    \\
+                |      \\
+                -------
+        (0,0) = V1     (1,0) = V_2   
+
+        onto the physical triangle given by the three vertices
+            U_1 = vertices[0, :]
+            U_2 = vertices[1, :]
+            U_3 = vertices[2, :]
+        
+        such that
+            Phi(V_1) = U_1
+            Phi(V_2) = U_2
+            Phi(V_3) = U_3
+            
+        Returns the metric matrix G evaluated at the points (xi_i, eta_i)
+            G[i, :, :] = J[i, :, :] (J[i, :, :]^T) 
+        
+        where J[i, :, :] is the Jacobian matrix evaluated at point (xi_i, eta_i).
+            
+        Usage
+        -----
+            mesh = ap3001_lib.Mesh('square', refinement=1)
+            xi = numpy.array([0.0, 1.0, 0.0])
+            eta = numpy.array([0.0, 0.0, 1.0])
+            element_idx = 4
+            G = mesh.jacobian_transpose_times_jacobian(xi, eta, element_idx)
+            
+        Parameters
+        ----------
+        xi : numpy.array(Float64), size (M, )
+            The xi coordinates of the M points where to evaluate the mapping Phi.
+        eta : numpy.array(Float64), size (M, )
+            The eta coordinates of the M points where to evaluate the mapping Phi.
+        element_idx: int size (single value)
+            The index of the element (triangle) in the mesh to use.
+        
+        Returns
+        -------
+        G : numpy.array(Float64), size (M, 2, 2)
+            The metric matrix G = (J^T) J evaluated at the points (xi_i, eta_i)
+                G[i, :, :] = (J[i, :, :]^T) J[i, :, :]
+            where J[i, :, :] is the Jacobian matrix evaluated at point (xi_i, eta_i).
+        """
+
+        # Check if inputs have the correct shape
+        if (len(xi.shape) > 1) or (len(eta.shape) > 1):
+            raise Exception("The input coordinates must be vectors, not arrays.")
+        
+        if (len(xi) != len(eta)):
+            raise Exception("The input coordinates must have the same number of coordinates.")
+
+        # Compute the G matrix G = (J^T) J
+        J = self.jacobian(xi, eta, element_idx)
+        G = numpy.linalg.matrix_transpose(J) @ J  # @ is just the operator in numpy for matrix multiplication
+        
+        return G
+
+
+    def inv_jacobian_transpose_times_jacobian(self, xi, eta, element_idx):
+        """Evaluates the inverse of the metric matrix G = (J^T) J of the mapping between 
+        the canonical triangle element and the physical triangle with index element_idx.
+
+        Computes the invers of the metric matrix G = (J^T) J, where J is the Jacobian matrix
+                 -                       -
+            J = | dPhi^x/dxi  dPhi^x/deta |
+                | dPhi^y/dxi  dPhi^y/deta |
+                 -                       -
+
+        of the mapping (x, y) = Phi(xi, eta) that maps a point (xi, eta) in the 
+
+        canonical triangle element
+
+        (0,1) = V_3
+                |\\
+                |  \\ 
+                |    \\
+                |      \\
+                -------
+        (0,0) = V1     (1,0) = V_2   
+
+        onto the physical triangle given by the three vertices
+            U_1 = vertices[0, :]
+            U_2 = vertices[1, :]
+            U_3 = vertices[2, :]
+        
+        such that
+            Phi(V_1) = U_1
+            Phi(V_2) = U_2
+            Phi(V_3) = U_3
+            
+        Returns the inverse of the metric matrix G evaluated at the points (xi_i, eta_i)
+            inv_G[i, :, :] = ((J[i, :, :]^T) J[i, :, :])^-1
+        
+        where J[i, :, :] is the Jacobian matrix evaluated at point (xi_i, eta_i).
+            
+        Usage
+        -----
+            mesh = ap3001_lib.Mesh('square', refinement=1)
+            xi = numpy.array([0.0, 1.0, 0.0])
+            eta = numpy.array([0.0, 0.0, 1.0])
+            element_idx = 4
+            inv_G = mesh.inv_jacobian_transpose_times_jacobian(xi, eta, element_idx)
+        
+        Parameters
+        ----------
+        xi : numpy.array(Float64), size (M, )
+            The xi coordinates of the M points where to evaluate the mapping Phi.
+        eta : numpy.array(Float64), size (M, )
+            The eta coordinates of the M points where to evaluate the mapping Phi.
+        element_idx: int size (single value)
+            The index of the element (triangle) in the mesh to use. 
+        
+        Returns
+        -------
+        inv_G : numpy.array(Float64), size (M, 2, 2)
+                The inverse of the metric matrix G = (J^T) J, i.e., G^-1, evaluated at the points (xi_i, eta_i)
+                    inv_G[i, :, :] = (G[i, :, :])^-1
+                where G[i, :, :] is metric matrix evaluated at point (xi_i, eta_i), and J is the
+                Jacobian matrix.
+        """
+
+        # Check if inputs have the correct shape
+        if (len(xi.shape) > 1) or (len(eta.shape) > 1):
+            raise Exception("The input coordinates must be vectors, not arrays.")
+        
+        if (len(xi) != len(eta)):
+            raise Exception("The input coordinates must have the same number of coordinates.")
+
+        # Evaluate the metric matrix G
+        G = self.jacobian_transpose_times_jacobian(xi, eta, element_idx)
+
+        # Compute the inverse
+        inv_G = numpy.linalg.inv(G)
+
+        return inv_G
+
+
+    def sqrt_det_jacobian_transpose_times_jacobian(self, xi, eta, element_idx):
+        """Evaluates the square root of the absolute value of the determinant of the 
+        metric matrix G = (J^T) J of the mapping between the canonical triangle element 
+        and the physical triangle with index element_idx.
+
+        Computes the square root of the determinant of the inverse of the metric matrix
+            sqrt(abs(det(G)))
+
+        with 
+            G = (J^T) J
+        
+        and J the Jacobian
+              -                       -
+        J =  | dPhi^x/dxi  dPhi^x/deta |
+             | dPhi^y/dxi  dPhi^y/deta |
+              -                       -
+
+        of the mapping (x, y) = Phi(xi, eta) that maps a point (xi, eta) in the 
+        canonical triangle element
+
+        (0,1) = V_3
+                |\\
+                |  \\ 
+                |    \\
+                |      \\
+                -------
+        (0,0) = V1     (1,0) = V_2   
+
+        onto the physical triangle given by the three vertices
+            U_1 = vertices[0, :]
+            U_2 = vertices[1, :]
+            U_3 = vertices[2, :]
+        
+        such that
+            Phi(V_1) = U_1
+            Phi(V_2) = U_2
+            Phi(V_3) = U_3
+            
+        Returns the square root of the absolute value of the determinant of the 
+        metric matrix G = (J^T) J at the points (xi_i, eta_i)
+            det_G[i] = sqrt(abs(det(G[i, :, :])))
+
+        NOTE: if the physical triangle is in R^2 then det_G[i] = det_J[i],
+            as generated by det_jacobian_triangle(xi, eta, vertices). Otherwise,
+            we are unable to compute the determinant of the Jacobian, because it
+            will not be a square matrix. We can always compute sqrt(abs(det(G))),
+            which makes it more general and more useful. For your use now, you can see
+            both as the same.
+            
+        Usage
+        -----
+            mesh = ap3001_lib.Mesh('square', refinement=1)
+            xi = numpy.array([0.0, 1.0, 0.0])
+            eta = numpy.array([0.0, 0.0, 1.0])
+            element_idx = 4
+            det_G = mesh.sqrt_det_jacobian_transpose_times_jacobian(xi, eta, element_idx)
+        
+        Parameters
+        ----------
+        xi : numpy.array(Float64), size (M, )
+            The xi coordinates of the M points where to evaluate the mapping Phi.
+        eta : numpy.array(Float64), size (M, )
+            The eta coordinates of the M points where to evaluate the mapping Phi.
+        element_idx: int size (single value)
+            The index of the element (triangle) in the mesh to use.
+        
+        Returns
+        -------
+        det_G : numpy.array(Float64), size (M,)
+                The square root of the absolute value of the determinant of the 
+                metric matrix G = (J^T) J, evaluated at the points (xi_i, eta_i)
+                det_G[i] = sqrt(abs(det(G[i, :, :]))).
+        """
+
+        # Check if inputs have the correct shape
+        if (len(xi.shape) > 1) or (len(eta.shape) > 1):
+            raise Exception("The input coordinates must be vectors, not arrays.")
+        
+        if (len(xi) != len(eta)):
+            raise Exception("The input coordinates must have the same number of coordinates.")
+        
+        # Compute the inverse of the metrix matrix
+        G = self.jacobian_transpose_times_jacobian(xi, eta, element_idx)
+
+        # Compute its determinant
+        det_G = numpy.linalg.det(G)
+
+        # Compute the absolute value and then its square root
+        sqrt_abs_det_G = numpy.sqrt(numpy.abs(det_G))
+
+        return sqrt_abs_det_G
+
+
+    def det_jacobian(self, xi, eta, element_idx):
+        """Evaluates the absolute value of the determinant of the Jacobian matrix of the mapping 
+        between the canonical triangle element and the physical triangle with index element_idx.
+
+        Computes the absolute value of determinant of the Jacobian matrix
+                          -                       -
+        det J = abs( det | dPhi^x/dxi  dPhi^x/deta | )
+                         | dPhi^y/dxi  dPhi^y/deta |
+                          -                       -
+
+        of the mapping (x, y) = Phi(xi, eta) that maps a point (xi, eta) in the 
+
+        canonical triangle element
+
+        (0,1) = V_3
+                |\\
+                |  \\ 
+                |    \\
+                |      \\
+                -------
+        (0,0) = V1     (1,0) = V_2   
+
+        onto the physical triangle given by the three vertices
+            U_1 = vertices[0, :]
+            U_2 = vertices[1, :]
+            U_3 = vertices[2, :]
+        
+        such that
+            Phi(V_1) = U_1
+            Phi(V_2) = U_2
+            Phi(V_3) = U_3
+            
+        Returns the determinant of the Jacobian matrix evaluated at the points (xi_i, eta_i)
+            det(J[i, :, :])
+            
+        Usage
+        -----
+            mesh = ap3001_lib.Mesh('square', refinement=1)
+            xi = numpy.array([0.0, 1.0, 0.0])
+            eta = numpy.array([0.0, 0.0, 1.0])
+            element_idx = 4
+            det_J = mesh.det_jacobian_triangle(xi, eta, element_idx)
+        
+        Parameters
+        ----------
+        xi : numpy.array(Float64), size (M, )
+            The xi coordinates of the M points where to evaluate the mapping Phi.
+        eta : numpy.array(Float64), size (M, )
+            The eta coordinates of the M points where to evaluate the mapping Phi.
+        element_idx: int size (single value)
+            The index of the element (triangle) in the mesh to use.
+        
+        Returns
+        -------
+        det_J : numpy.array(Float64), size (M,)
+                The absolute value of the determinant of the Jacobian matrix evaluated at the points (xi_i, eta_i)
+                det_J[i] = abs(det(J(xi_i, eta_i)))
+        """
+
+        # Check if inputs have the correct shape
+        if (len(xi.shape) > 1) or (len(eta.shape) > 1):
+            raise Exception("The input coordinates must be vectors, not arrays.")
+        
+        if (len(xi) != len(eta)):
+            raise Exception("The input coordinates must have the same number of coordinates.")
+
+        # Evaluate the Jacobian at each of the points
+        J = self.jacobian(xi, eta, element_idx)
+
+        # Compute the determinant for each point
+        det_J = numpy.abs(numpy.linalg.det(J))
+
+        return det_J
+    
+
+    def refine(self, value: int):
+        return Mesh(self.type_of_mesh, self.mesh.refined(value))
+        
+    def draw(self):
+        ax = self._mesh.draw()
+        ax.set_axis_on()
+        return ax
+
+def plot(mesh, u, **kwargs):
+    return skplot(mesh._mesh, u, **kwargs)
+
+def plot3d(mesh,u):
+    return skplot3(mesh._mesh, u)
+
+# -----------------------------------------------------------------------------
+
+
+# Quadrature ------------------------------------------------------------------
+
+def gauss_quadrature_2D_triangle(N):
+    """Returns the Gauss quadrature weights and nodes for 2D quadrature of degree N over triangles.
+
+    Returns the M 2D Gauss quadrature weights associated to quadrature of degree N
+        w_{i}, i = 1, ..., M
+    associated to the nodes    
+        (xi, eta)_{i} in the canonical triangle (Omega_t) xi in [0, 1], eta in [0, 1] and eta + xi <= 1, i = 1, ..., M    
+    to approximate
+        int_{Omega_t} f(xi, eta) dxi deta approx sum_{i=1}^{M} w_{i} f(xi_{i}, eta_{i})
+
+    Usage
+    -----
+        N = 1
+        xi, eta, w = gauss_legendre_quadrature_2D_triangle(N) 
+    
+    Parameters
+    ----------
+    N : int
+        The quadrature degree, it must be a positive number, i.e., N > 0.
+        NOTE: For now only N = 1 is implemented.
+    
+    Returns
+    -------
+    xi : numpy.array(Float64), size (M, )
+        The xi coordinates of the M quadrature nodes associated to the M quadrature 
+        weights w_{i}, i = 1, ..., M.
+    eta : numpy.array(Float64), size (M, )
+        The eta coordinates of the M quadrature nodes associated to the M quadrature 
+        weights w_{i}, i = 1, ..., M.
+    w : numpy.array(Float64), size (M, )
+        The M quadrature weights associated to the M quadrature nodes (xi_{i}, eta_{i}), i = 1, ..., M.
+    """
+    if N > 1:
+        raise Exception("Gauss quadrature on triangles implemented only for N=1")
+    
+    # We generate the nodes and weights by hand for the case N =1,
+    # the only case implemented
+    xi = numpy.array([0.0, 1.0, 0.0])
+    eta = numpy.array([0.0, 0.0, 1.0])
+    w = numpy.array([1.0/6.0, 1.0/6.0, 1.0/6.0])
+
+    return xi, eta, w
+
+def gauss_legendre_quadrature_1D(N):
+    """Returns N Gauss-Legendre quadrature weights and nodes for 1D integration.
+
+    Returns N Gauss-Legendre quadrature weights
+        w_{i}, i = 1, ..., N
+    and N nodes
+        xi_{i} in [-1, 1], i = 1, ..., N    
+    to approximate
+        int_{-1}^{1} f(xi) dxi approx sum_{i=1}^{N} w_{i} f(xi_{i})
+
+    Usage
+    -----
+        N = 2
+        x, w = gauss_legendre_quadrature_1D(N) 
+    
+    Parameters
+    ----------
+    N : int
+        The number of quadrature nodes, it must be a positive number, i.e., N > 0.
+    
+    Returns
+    -------
+    xi : numpy.array(Float64), size (N, )
+        The N quadrature nodes associated to the N quadrature weights w_{i}, i = 1, ..., N.
+    w : numpy.array(Float64), size (N, )
+        The N quadrature weights associated to the N quadrature nodes xi_{i}, i = 1, ..., N.
+    """
+
+    # Use the existing function in numpy
+    xi, w = numpy.polynomial.legendre.leggauss(N)
+
+    return xi, w
+
+
+def gauss_legendre_quadrature_2D_quads(N_xi, N_eta):
+    """Returns N_xi x N_eta Gauss-Legendre quadrature weights and nodes for 2D integration over quadrilaterals.
+
+    Returns N_xi x N_eta 2D Gauss-Legendre quadrature weights
+        w_{i}, i = 1, ..., N_xi x N_eta
+    and N_xi x N_eta nodes
+        (xi, eta)_{i} in [-1, 1] x [-1, 1], i = 1, ..., N_xi x N_eta    
+    to approximate
+        int_{-1}^{1} int_{-1}^{1} f(xi, eta) dxi deta approx sum_{i=1}^{N_xi + N_eta} w_{i} f(xi_{i}, eta_{i})
+
+    Note that:
+        w_{m + (n - 1)N_xi} = w_xi_{m} w_eta_{n}, m = 1, ..., N_xi and n = 1, ..., N_eta
+        (xi, eta)_{m + (n - 1)N_xi} = (xi_{m}, eta_{n}) m = 1, ..., N_xi and n = 1, ..., N_eta
+
+    Usage
+    -----
+        N_xi = 2
+        N_eta = 2
+        xi, eta, w = gauss_legendre_quadrature_2D(N_xi, N_eta) 
+    
+    Parameters
+    ----------
+    N_xi : int
+        The number of quadrature nodes in the xi direction, it must be a positive number, i.e., N > 0.
+    N_eta : int
+        The number of quadrature nodes in the eta direction, it must be a positive number, i.e., N > 0.
+    
+    Returns
+    -------
+    xi : numpy.array(Float64), size (N_xi * N_eta, )
+        The xi coordinate of the N = N_xi*N_eta quadrature nodes associated to the N quadrature 
+        weights w_{i}, i = 1, ..., N.
+    eta : numpy.array(Float64), size (N_xi * N_eta, )
+        The eta coordinate of the N = N_xi*N_eta quadrature nodes associated to the N quadrature 
+        weights w_{i}, i = 1, ..., N.
+    w : numpy.array(Float64), size (N_xi * N_eta, )
+        The N=N_xi * N_eta quadrature weights associated to the N quadrature nodes (xi_{i}, eta_{i}), i = 1, ..., N.
+    """
+
+    # The Gauss quadrature in 2D is computed via tensor-product of the two 1D quadratures
+    
+    # Compute the two 1D quadratures
+    xi_1D, w_xi = gauss_legendre_quadrature_1D(N_xi)
+    eta_1D, w_eta = gauss_legendre_quadrature_1D(N_eta)
+
+    # Compute the 2D quadrature weights as Kronecker product of the 1D quadrature weights
+    w = numpy.kron(w_xi, w_eta)
+
+    # Compute the 2D quadrature nodes as tensor product of the 1D nodes
+    xi, eta = numpy.meshgrid(xi_1D, eta_1D)
+
+    return xi.flatten(), eta.flatten(), w.flatten()
+
+# -----------------------------------------------------------------------------
+
+
+
+# Assembly --------------------------------------------------------------------
+
+def assemble_global_mass_matrix(basis, sigma):
+    # We need to compute the mass matrix M, with elements
+    #   M_{i,s} = \int_{\Omega} \varphi_{i} \varphi_{r} dx dy
+    # As we saw in the lectures, we can break this down into 
+    # a sum of the contributions from each of the K elements \Omega_{l}
+    # l = 1, ..., M 
+    #
+    #   M_{i,r} = \sum_{l=1}^{K}\int_{\Omega_{l}} \varphi_{i} \varphi_{r} dx dy
+    #
+    # We also saw that each basis \varphi_{i} can be expressed as a linear 
+    # combination of the local basis B_l_j
+    # 
+    #   \varphi_{i}(x, y) = \sum_{l=1}^{K}\sum_{j=1}^{n_local_basis} E_{l,i,j} B_{l, j}(x, y) 
+    #
+    #  For this reason, we have
+    # 
+    #   M_{i,r} = \sum_{l=1}^{K}\sum_{j,s = 1}^{n_local_basis} E_{l,i,j} E_{l,r,s}\int_{\Omega_{l}} B_{l,j}(x, y) B_{l, s}(x, y) dx dy
+    # 
+    # The integral of the local basis, could be done via Gauss quadrature. To use
+    # Gauss quadrature, we first need to convert the integral from the element \Omega_{l}
+    # to the canonical element \Omega_{c}, as we saw in the lectures 
+    #
+    #   M_{i,r} = \sum_{l=1}^{K}\sum_{j,s = 1}^{n_local_basis} E_{l,i,j} E_{l,r,s} \int_{\Omega_{c}} B_{l,j}(\Phi_{l}(xi, eta)) B_{l, s}(\Phi_{l}(xi, eta)) |det(J(xi, eta))| dxi deta
+    #
+    # If we recall that B_{l, s}(x, y) = Bc_s(\Phi^{-1}_{l}(x, y)), then 
+    #
+    #   B_{l, s}(\Phi_{l}(xi, eta)) = Bc_s(\Phi^{-1}_{l}(\Phi_{l}(xi, eta))
+    #                               = Bc_s(xi, eta)
+    #
+    # and we can write 
+    # 
+    #   M_{i,r} = \sum_{l=1}^{K}\sum_{j,s = 1}^{n_local_basis} E_{l,i,j} E_{l,r,s} \int_{\Omega_{c}} Bc_{j}(xi, eta) Bc_{s}(xi, eta) |det(J(xi, eta))| dxi deta
+    #
+    # which, if you recall, is just 
+    #
+    #    M_{i,r} = \sum_{l=1}^{K}\sum_{j,s = 1}^{n_local_basis} E_{l,i,j} E_{l,r,s} M_local_{js}
+
+    # Get the number of elements 
+    n_elements = basis.mesh.number_of_elements()
+
+    # Get the number of local/canonical basis
+    n_canonical_basis = basis.n_canonical_basis
+
+    # Determine the size of the matrix 
+    # NOTE: Here we assemble the whole mass matrix, i.e., we compute all possible inner products 
+    #       without ignoring the boundary basis. This is more efficient. We will then deal with 
+    #       the essential boundary conditions in another function. For now, the focus is to contruct 
+    #       a mass matrix with the inner products between all basis.
+    n_basis = basis.n_basis  # the total number of basis \varphi_{j}(x, y)
+
+    # Setup the global matrix to store the data 
+    M_global = sparse_matrix((n_basis, n_basis), dtype='float64')  # it is a sparse matrix, so that we only need to store 
+                                                                   # the nonzero elements 
+
+    # Loop over the elements of the mesh and add the contribution from that element, i.e.,
+    # as we pass over each element we will add 
+    #
+    #   \sum_{j,s = 1}^{n_local_basis} E_{l,i,j} E_{l,r,s} M_local_{js}
+    #
+    # once we pass by all elements, we will have added all contributions and we will have 
+    #
+    #   M_{i,r} = \sum_{l=1}^{K}\sum_{j,s = 1}^{n_local_basis} E_{l,i,j} E_{l,r,s} M_local_{js}
+    for element_idx in numpy.arange(0, n_elements):
+        # Compute the local mass matrix M_local 
+        M_local = generate_element_mass_matrix(basis, element_idx, sigma)
+
+        # Add the contribution to the global matrix 
+        # We could loop over all basis (even the ones that we know are zero on the element)
+        # but this would be very slow. That approach is given below (commented out). 
+
+        # for basis_i_idx in numpy.arange(n_basis):
+        #     for basis_r_idx in numpy.arange(n_basis):
+        #         for canonical_basis_j_idx in numpy.arange(0, n_canonical_basis):
+        #             for canonical_basis_s_idx in numpy.arange(0, n_canonical_basis):
+        #                 M_global[basis_i_idx, basis_r_idx] += basis.E_active_basis[element_idx, basis_i_idx, canonical_basis_j_idx] * basis.E_active_basis[element_idx, basis_r_idx, canonical_basis_s_idx] * M_local[canonical_basis_j_idx, canonical_basis_s_idx]
+
+        # An alternative is to loop only over the active basis on each element, i.e., the basis 
+        # that are nonzero in the element. For that, instead of using the full extraction 
+        # coefficient matrix
+        #
+        #    basis.E_full
+        #
+        # we use the efficient version of it, that stores only the coefficients for the active basis 
+        #
+        #   basis.E_active_basis
+        #
+        # and the indices of the active basis
+        #
+        #   basis.element_active_basis_idx
+        #
+        # In the questions, you were asked to show that the two approaches are equivalent. Implement 
+        # this efficient approach here
+        for active_basis_i_local_idx, active_basis_i_global_idx in enumerate(basis.element_active_basis_idx[element_idx]):
+            for active_basis_r_local_idx, active_basis_r_global_idx in enumerate(basis.element_active_basis_idx[element_idx]):
+                for canonical_basis_j_idx in numpy.arange(0, n_canonical_basis):
+                    for canonical_basis_s_idx in numpy.arange(0, n_canonical_basis):
+                        M_global[active_basis_i_global_idx, active_basis_r_global_idx] += basis.E_active_basis[element_idx, active_basis_i_local_idx, canonical_basis_j_idx] * basis.E_active_basis[element_idx, active_basis_r_local_idx, canonical_basis_s_idx] * M_local[canonical_basis_j_idx, canonical_basis_s_idx]
+
+    return M_global
+
+
+def assemble_global_stiffness_matrix(basis, sigma):
+    # We need to compute the stiffness matrix N, with elements
+    #   N_{i,s} = \int_{\Omega} nabla\varphi_{i} \cdot \nabla\varphi_{r} dx dy
+    # As we saw in the lectures, we can break this down into 
+    # a sum of the contributions from each of the K elements \Omega_{l}
+    # l = 1, ..., M 
+    #
+    #   N_{i,r} = \sum_{l=1}^{K}\int_{\Omega_{l}} \nabla\varphi_{i} \cdot \nabla\varphi_{r} dx dy
+    #
+    # We also saw that each basis \varphi_{i} can be expressed as a linear 
+    # combination of the local basis B_l_j
+    # 
+    #   \varphi_{i}(x, y) = \sum_{l=1}^{K}\sum_{j=1}^{n_local_basis} E_{l,i,j} B_{l, j}(x, y) 
+    #
+    #  For this reason, we have
+    # 
+    #   N_{i,r} = \sum_{l=1}^{K}\sum_{j,s = 1}^{n_local_basis} E_{l,i,j} E_{l,r,s}\int_{\Omega_{l}} \nabla B_{l,j}(x, y) \cdot \nabla B_{l, s}(x, y) dx dy
+    # 
+    # The integral of the local basis, could be done via Gauss quadrature. To use
+    # Gauss quadrature, we first need to convert the integral from the element \Omega_{l}
+    # to the canonical element \Omega_{c}, as we saw in the lectures 
+    #
+    #   N_{i,r} = \sum_{l=1}^{K}\sum_{j,s = 1}^{n_local_basis} E_{l,i,j} E_{l,r,s} \int_{\Omega_{c}} \nabla^{c} B_{l,j}(\Phi_{l}(xi, eta)) (J^{T} J)^{-1} \nabla^{c} B_{l, s}(\Phi_{l}(xi, eta)) |det(J(xi, eta))| dxi deta
+    #
+    # If we recall that B_{l, s}(x, y) = Bc_s(\Phi^{-1}_{l}(x, y)), then 
+    #
+    #   B_{l, s}(\Phi_{l}(xi, eta)) = Bc_s(\Phi^{-1}_{l}(\Phi_{l}(xi, eta))
+    #                               = Bc_s(xi, eta)
+    #
+    # and we can write 
+    # 
+    #   N_{i,r} = \sum_{l=1}^{K}\sum_{j,s = 1}^{n_local_basis} E_{l,i,j} E_{l,r,s} \int_{\Omega_{c}} \nabla^{c} Bc_{j}(xi, eta) (J^{T} J)^{-1} \nabla^{c} Bc_{s}(xi, eta) |det(J(xi, eta))| dxi deta
+    #
+    # which, if you recall, is just 
+    #
+    #    N_{i,r} = \sum_{l=1}^{K}\sum_{j,s = 1}^{n_local_basis} E_{l,i,j} E_{l,r,s} N_local_{js}
+
+    # The assembly procedure, as expected, is exactly the same as for the mass matrix M.
+
+    # Get the number of elements 
+    n_elements = basis.mesh.number_of_elements()
+
+    # Get the number of local/canonical basis
+    n_canonical_basis = basis.n_canonical_basis
+
+    # Determine the size of the matrix 
+    # NOTE: Here we assemble the whole mass matrix, i.e., we compute all possible inner products 
+    #       without ignoring the boundary basis. This is more efficient. We will then deal with 
+    #       the essential boundary conditions in another function. For now, the focus is to contruct 
+    #       a mass matrix with the inner products between all basis.
+    n_basis = basis.n_basis  # the total number of basis \varphi_{j}(x, y)
+
+    # Setup the global matrix to store the data 
+    N_global = sparse_matrix((n_basis, n_basis), dtype='float64')  # it is a sparse matrix, so that we only need to store 
+                                                                   # the nonzero elements 
+
+    # Loop over the elements of the mesh and add the contribution from that element, i.e.,
+    # as we pass over each element we will add 
+    #
+    #   \sum_{j,s = 1}^{n_local_basis} E_{l,i,j} E_{l,r,s} N_local_{js}
+    #
+    # once we pass by all elements, we will have added all contributions and we will have 
+    #
+    #   N_{i,r} = \sum_{l=1}^{K}\sum_{j,s = 1}^{n_local_basis} E_{l,i,j} E_{l,r,s} N_local_{js}
+    for element_idx in numpy.arange(0, n_elements):
+        # Compute the local mass matrix N_local 
+        N_local = generate_element_stiffness_matrix(basis, element_idx, sigma)
+
+        # Add the contribution to the global matrix 
+        # We could loop over all basis (even the ones that we know are zero on the element)
+        # but this would be very slow. That approach is given below (commented out). 
+
+        # for basis_i_idx in numpy.arange(n_basis):
+        #     for basis_r_idx in numpy.arange(n_basis):
+        #         for canonical_basis_j_idx in numpy.arange(0, n_canonical_basis):
+        #             for canonical_basis_s_idx in numpy.arange(0, n_canonical_basis):
+        #                 N_global[basis_i_idx, basis_r_idx] += basis.E_active_basis[element_idx, basis_i_idx, canonical_basis_j_idx] * basis.E_active_basis[element_idx, basis_r_idx, canonical_basis_s_idx] * N_local[canonical_basis_j_idx, canonical_basis_s_idx]
+
+        # An alternative is to loop only over the active basis on each element, i.e., the basis 
+        # that are nonzero in the element. For that, instead of using the full extraction 
+        # coefficient matrix
+        #
+        #    basis.E_full
+        #
+        # we use the efficient version of it, that stores only the coefficients for the active basis 
+        #
+        #   basis.E_active_basis
+        #
+        # and the indices of the active basis
+        #
+        #   basis.element_active_basis_idx
+        #
+        # In the questions, you were asked to show that the two approaches are equivalent. Implement 
+        # this efficient approach here
+        for active_basis_i_local_idx, active_basis_i_global_idx in enumerate(basis.element_active_basis_idx[element_idx]):
+            for active_basis_r_local_idx, active_basis_r_global_idx in enumerate(basis.element_active_basis_idx[element_idx]):
+                for canonical_basis_j_idx in numpy.arange(0, n_canonical_basis):
+                    for canonical_basis_s_idx in numpy.arange(0, n_canonical_basis):
+                        N_global[active_basis_i_global_idx, active_basis_r_global_idx] += basis.E_active_basis[element_idx, active_basis_i_local_idx, canonical_basis_j_idx] * basis.E_active_basis[element_idx, active_basis_r_local_idx, canonical_basis_s_idx] * N_local[canonical_basis_j_idx, canonical_basis_s_idx]
+
+    return N_global
+
+
+def assemble_global_vector(basis, f):
+    # We need to compute the right hand side vector f, with elements
+    #   f_{j} = \int_{\Omega} f(x, y) \varphi_{j} dx dy
+    # As we saw in the lectures, we can break this down into 
+    # a sum of the contributions from each of the K elements \Omega_{l}
+    # l = 1, ..., M 
+    #
+    #   f_{r} = \sum_{l=1}^{K}\int_{\Omega_{l}} f(x, y) \varphi_{r} dx dy
+    #
+    # We also saw that each basis \varphi_{r} can be expressed as a linear 
+    # combination of the local basis B_l_s
+    # 
+    #   \varphi_{r}(x, y) = \sum_{l=1}^{K}\sum_{s=1}^{n_local_basis} E_{l,r,s} B_{l, s}(x, y) 
+    #
+    #  For this reason, we have
+    # 
+    #   f_{r} = \sum_{l=1}^{K}\sum_{s = 1}^{n_local_basis} E_{l,r,s}\int_{\Omega_{l}} f(x, y) B_{l, s}(x, y) dx dy
+    # 
+    # The integral could be done via Gauss quadrature. To use
+    # Gauss quadrature, we first need to convert the integral from the element \Omega_{l}
+    # to the canonical element \Omega_{c}, as we saw in the lectures 
+    #
+    #   f_{r} = \sum_{l=1}^{K}\sum_{s = 1}^{n_local_basis} E_{l,r,s} \int_{\Omega_{c}} f(\Phi(xi, eta)) B_{l, s}(\Phi_{l}(xi, eta)) |det(J(xi, eta))| dxi deta
+    #
+    # If we recall that B_{l, s}(x, y) = Bc_s(\Phi^{-1}_{l}(x, y)), then 
+    #
+    #   B_{l, s}(\Phi_{l}(xi, eta)) = Bc_s(\Phi^{-1}_{l}(\Phi_{l}(xi, eta))
+    #                               = Bc_s(xi, eta)
+    #
+    # and we can write 
+    # 
+    #   f_{r} = \sum_{l=1}^{K}\sum_{s = 1}^{n_local_basis} E_{l,r,s} \int_{\Omega_{c}} f(\Phi(xi, eta)) Bc_{s}(xi, eta) |det(J(xi, eta))| dxi deta
+    #
+    # which, if you recall, is just 
+    #
+    #    f_{r} = \sum_{l=1}^{K}\sum_{s = 1}^{n_local_basis} E_{l,r,s} f_local_{s}
+
+    # The assembly procedure, as expected, is exactly the same as for the mass and stiffness 
+    # matrices, just that now we only have to loop over one set of global basi \varphi_{s},
+    # instead of two.
+
+    # Get the number of elements 
+    n_elements = basis.mesh.number_of_elements()
+
+    # Get the number of local/canonical basis
+    n_canonical_basis = basis.n_canonical_basis
+
+    # Determine the size of the matrix 
+    # NOTE: Here we assemble the whole vector, i.e., we compute all possible inner products 
+    #       without ignoring the boundary basis. This is more efficient. We will then deal with 
+    #       the essential boundary conditions in another function. For now, the focus is to contruct 
+    #       a vector with all basis.
+    n_basis = basis.n_basis  # the total number of basis \varphi_{s}(x, y)
+
+    # Setup the global vector to store the data 
+    f_global = numpy.zeros(n_basis)
+
+    # Loop over the elements of the mesh and add the contribution from that element, i.e.,
+    # as we pass over each element we will add 
+    #
+    #   \sum_{j,s = 1}^{n_local_basis} E_{l,r,s} f_local_{s}
+    #
+    # once we pass by all elements, we will have added all contributions and we will have 
+    #
+    #   f_{r} = \sum_{l=1}^{K}\sum_{s = 1}^{n_local_basis} E_{l,r,s} f_local_{s}
+    for element_idx in numpy.arange(0, n_elements):
+        # Compute the local vector f_local 
+        f_local = generate_element_vector(basis, element_idx, f)
+
+        # Add the contribution to the global vector 
+        # We could loop over all basis (even the ones that we know are zero on the element)
+        # but this would be very slow. That approach is given below (commented out). 
+
+        # for basis_r_idx in numpy.arange(n_basis):
+        #     for canonical_basis_s_idx in numpy.arange(0, n_canonical_basis):
+        #         f_global[basis_r_idx] += basis.E_active_basis[element_idx, basis_r_idx, canonical_basis_s_idx] * f_local[canonical_basis_s_idx]
+
+        # An alternative is to loop only over the active basis on each element, i.e., the basis 
+        # that are nonzero in the element. For that, instead of using the full extraction 
+        # coefficient matrix
+        #
+        #    basis.E_full
+        #
+        # we use the efficient version of it, that stores only the coefficients for the active basis 
+        #
+        #   basis.E_active_basis
+        #
+        # and the indices of the active basis
+        #
+        #   basis.element_active_basis_idx
+        #
+        # In the questions, you were asked to show that the two approaches are equivalent. Implement 
+        # this efficient approach here
+        for active_basis_r_local_idx, active_basis_r_global_idx in enumerate(basis.element_active_basis_idx[element_idx]):
+            for canonical_basis_s_idx in numpy.arange(0, n_canonical_basis):
+                f_global[active_basis_r_global_idx] += basis.E_active_basis[element_idx, active_basis_r_local_idx, canonical_basis_s_idx] * f_local[canonical_basis_s_idx]
+
+    return f_global
+
+
+# -----------------------------------------------------------------------------
+
+
+
+
+# Boundary conditions ---------------------------------------------------------
+
+def impose_boundary_conditions_matrix(M, basis):
+    for essential_bc_key in basis.essential_bcs:
+        for boundary_basis_idx, boundary_value in zip(basis.essential_bcs[essential_bc_key]['indices'], basis.essential_bcs[essential_bc_key]['values']):
+            # Modify the matrix M to enforce the boundary condition
+            M[boundary_basis_idx,:] = 0.0
+            M[boundary_basis_idx, boundary_basis_idx] = 1.0
+
+    return M
+
+def impose_boundary_conditions_vector(f, basis):
+    for essential_bc_key in basis.essential_bcs:
+        for boundary_basis_idx, boundary_value in zip(basis.essential_bcs[essential_bc_key]['indices'], basis.essential_bcs[essential_bc_key]['values']):
+            # Modify the vector to assign the boundary condition value
+            f[boundary_basis_idx] = boundary_value
+
+    return f
+
+# -----------------------------------------------------------------------------
