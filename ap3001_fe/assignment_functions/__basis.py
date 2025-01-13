@@ -181,27 +181,27 @@ def grad_basis_canonical_triangle(xi, eta):
     grad_B_c_eval = numpy.zeros([n_basis, n_eval_points, 2])
     
     # Basis associated to node 1 (xi, eta) = (0.0, 0.0)
-    alpha_1 = # TODO
-    beta_1 =  # TODO
-    gamma_1 = # TODO
+    alpha_1 = 1
+    beta_1 =  -1
+    gamma_1 = -1
 
-    grad_B_c_eval[0, :, 0] =  # TODO 
-    grad_B_c_eval[0, :, 1] =  # TODO 
+    grad_B_c_eval[0, :, 0] =  -1
+    grad_B_c_eval[0, :, 1] =  -1 
 
     # Basis associated to node 2 (xi, eta) = (1.0, 0.0)
-    alpha_2 = # TODO
-    beta_2 =  # TODO
-    gamma_2 = # TODO
+    alpha_2 = 0
+    beta_2 =  1
+    gamma_2 = 0
 
-    grad_B_c_eval[1, :, 0] = # TODO 
-    grad_B_c_eval[1, :, 1] = # TODO 
+    grad_B_c_eval[1, :, 0] = 1 
+    grad_B_c_eval[1, :, 1] = 0 
 
     # Basis associated to node 3 (xi, eta) = (0.0, 1.0)
-    alpha_3 =  # TODO
-    beta_3 =   # TODO
-    gamma_3 =  # TODO
+    alpha_3 =  0
+    beta_3 =   0
+    gamma_3 =  1
 
-    grad_B_c_eval[2, :, 0] = # TODO 
-    grad_B_c_eval[2, :, 1] = # TODO 
+    grad_B_c_eval[2, :, 0] = 0
+    grad_B_c_eval[2, :, 1] = 1 
 
     return grad_B_c_eval
