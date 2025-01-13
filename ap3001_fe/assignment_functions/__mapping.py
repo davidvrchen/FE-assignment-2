@@ -176,10 +176,10 @@ def jacobian_triangle(xi, eta, vertices):
     J = numpy.zeros([n_eval_points, physical_manifold_dimension, canonical_manifold_dimension])
 
     # Compute each term of the Jacobian (note that it is the same for all points)
-    dPhi_x_d_xi =   # TODO
-    dPhi_x_d_eta =  # TODO
-    dPhi_y_d_xi =   # TODO
-    dPhi_y_d_eta =  # TODO
+    dPhi_x_d_xi =   vertices[1][0] - vertices[0][0]
+    dPhi_x_d_eta =  vertices[2][0] - vertices[0][0]
+    dPhi_y_d_xi =   vertices[1][1] - vertices[0][1]
+    dPhi_y_d_eta =  vertices[2][1] - vertices[0][1]
 
     # Then place it in the Jacobian matrix
     # We could have made this into a 2D matrix instead of repeating the same for all points
