@@ -70,8 +70,8 @@ def mapping_triangle(xi, eta, vertices):
     if (len(xi) != len(eta)):
         raise Exception("The input coordinates must have the same number of coordinates.")
 
-    x = # TODO
-    y = # TODO
+    x = vertices[0][0] + xi*(vertices[1][0] - vertices[0][0]) + eta*(vertices[2][0] - vertices[0][0])
+    y = vertices[0][1] + xi*(vertices[1][1] - vertices[0][1]) + eta*(vertices[2][1] - vertices[0][1])
 
     return x, y
     
